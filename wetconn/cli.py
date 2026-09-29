@@ -12,7 +12,14 @@ from .least_cost import least_cost_connectivity
 
 
 def _common(p):
-    p.add_argument("--wip", required=True, help="Wetland probability raster (0-1).")
+    p.add_argument("--wip", required=True, help="Wetland probability raster.")
+    p.add_argument(
+        "--wip-scale",
+        type=float,
+        default=None,
+        help="Divide wip by this to get a 0-1 probability. Default: 100 if the "
+        "raster's values run past 1 but not past 100 (percent), else 1.",
+    )
     p.add_argument("--streams", required=True, help="Flowline vector file.")
     p.add_argument("-o", "--out", required=True, help="Output GeoTIFF.")
     p.add_argument(
@@ -37,8 +44,9 @@ def _common(p):
         "--min-wip",
         type=float,
         default=0.0,
-        help="Floor on wip so zero-probability pixels are passable at high cost "
-        "instead of being barriers.",
+        help="Floor on wip (after scaling) when crossing a pixel, so zero-probability "
+        "pixels are passable at high cost instead of being barriers. A pixel's own "
+        "p_joint still uses its unfloored wip.",
     )
 
 
@@ -71,6 +79,13 @@ def main(argv=None):
     wip, valid, profile = io.read_raster(args.wip)
     if profile["crs"] is None or profile["crs"].is_geographic:
         parser.error("the wip raster must be in a projected CRS with metre-like units.")
+    scale = args.wip_scale
+    if scale is None:
+        top = np.max(wip[valid]) if valid.any() else 1.0
+        scale = 100.0 if 1 < top <= 100 else 1.0
+        if scale != 1:
+            print(f"wip values run to {top:g}; treating them as percent (--wip-scale 100)")
+    wip = wip / scale
     dx, dy = pixel_size(profile["transform"])
     ref_length = float(np.sqrt(dx * dy)) if args.ref_length is None else args.ref_length
     streams, labels = io.rasterize_streams(
@@ -85,7 +100,12 @@ def main(argv=None):
         f"ref_length {ref_length:g}, {streams.sum()} stream pixels"
     )
 
-    tags = {"method": args.method, "ref_length": ref_length, "min_wip": args.min_wip}
+    tags = {
+        "method": args.method,
+        "ref_length": ref_length,
+        "wip_scale": scale,
+        "min_wip": args.min_wip,
+    }
     if args.method == "least-cost":
         result = least_cost_connectivity(
             wip, streams, dx, dy, ref_length, valid, labels, args.min_wip

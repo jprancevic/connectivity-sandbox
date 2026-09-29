@@ -23,12 +23,16 @@ pytest
 ```bash
 # Method 1
 python -m wetconn least-cost --wip proctor_wip.tif --streams proctor_flowlines.gpkg \
-    -o proctor_least_cost.tif --ref-length 3
+    -o proctor_least_cost.tif --ref-length 3 --min-wip 0.005
 
 # Method 2 (the DEM is resampled onto the WIP grid if it differs)
 python -m wetconn flowpath --wip proctor_wip.tif --dem proctor_dem.tif \
-    --streams proctor_flowlines.gpkg -o proctor_flowpath.tif --ref-length 3
+    --streams proctor_flowlines.gpkg -o proctor_flowpath.tif --ref-length 3 --min-wip 0.005
 ```
+
+WIP stored as percent (0–100, as in `proctor_wip.tif`) is detected and divided
+by 100; `--wip-scale` sets the divisor explicitly. `--min-wip 0.005` is half
+the 1% rounding step: a stored 0 means "under 0.5%", not impossible.
 
 Or from Python:
 

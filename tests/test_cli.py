@@ -10,19 +10,19 @@ CRS = "EPSG:6350"
 X0, Y0, RES = -1915000.0, 3019000.0, 3.0
 
 
-def _write(path, arr, res=RES, nodata=None):
+def _write(path, arr, res=RES, nodata=None, dtype="float32"):
     profile = dict(
         driver="GTiff",
         height=arr.shape[0],
         width=arr.shape[1],
         count=1,
-        dtype="float32",
+        dtype=dtype,
         crs=CRS,
         transform=from_origin(X0, Y0, res, res),
         nodata=nodata,
     )
     with rasterio.open(path, "w", **profile) as dst:
-        dst.write(arr.astype(np.float32), 1)
+        dst.write(arr.astype(dtype), 1)
 
 
 def _inputs(tmp_path):
@@ -73,3 +73,24 @@ def test_flowpath_cli(tmp_path):
     assert "status" in bands and tags["depressions"] == "fill"
     assert np.nanmax(bands["p_conn"]) == 1.0
     assert np.all(bands["status"][2:-2, 2:-2] == 1)
+
+
+def test_percent_wip_is_autoscaled_and_zeros_floored(tmp_path):
+    # uint8 percent, nodata 255, like the Proctor WIP. A column of zeros sits
+    # between the stream (column 1) and the rest of the grid.
+    d = _inputs(tmp_path)
+    wip = np.full((40, 40), 60, np.uint8)
+    wip[:, 4] = 0
+    wip[0, 0] = 255
+    _write(d / "wip_pct.tif", wip, nodata=255, dtype="uint8")
+    out = d / "pct.tif"
+    main(
+        ["least-cost", "--wip", str(d / "wip_pct.tif"), "--streams", str(d / "streams.gpkg"),
+         "-o", str(out), "--centre-only", "--min-wip", "0.005"]
+    )
+    bands, tags = _read(out)
+    assert tags["wip_scale"] == "100.0"
+    np.testing.assert_allclose(bands["p_joint"][5, 1:4], [0.6, 0.6, 0.36], rtol=1e-6)
+    assert bands["p_joint"][5, 4] == 0.0  # zero pixel keeps its own p_joint = 0
+    # Beyond the zero column, paths cross it at the floored probability.
+    np.testing.assert_allclose(bands["p_conn"][5, 5], 0.6**2 * 0.005, rtol=1e-5)
