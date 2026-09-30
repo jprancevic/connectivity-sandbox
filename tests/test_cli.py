@@ -1,4 +1,5 @@
 import geopandas as gpd
+import pytest
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
@@ -94,3 +95,19 @@ def test_percent_wip_is_autoscaled_and_zeros_floored(tmp_path):
     assert bands["p_joint"][5, 4] == 0.0  # zero pixel keeps its own p_joint = 0
     # Beyond the zero column, paths cross it at the floored probability.
     np.testing.assert_allclose(bands["p_conn"][5, 5], 0.6**2 * 0.005, rtol=1e-5)
+
+
+def test_least_cost_downstream_cli(tmp_path):
+    d = _inputs(tmp_path)
+    out = d / "lcd.tif"
+    base = ["least-cost", "--wip", str(d / "wip.tif"), "--streams", str(d / "streams.gpkg"),
+            "-o", str(out), "--centre-only", "--downstream-only"]
+    with pytest.raises(SystemExit):
+        main(base)  # no --dem
+    main(base + ["--dem", str(d / "dem.tif"), "--path-threshold", "0.75"])
+    bands, tags = _read(out)
+    assert tags["downstream_only"] == "True" and tags["max_uphill_slope"] == "0.01"
+    assert tags["path_threshold"] == "0.75"
+    # DEM slopes down to the stream, so every pixel connects as before, with
+    # travel through 0.6 pixels at 0.6 / 0.75 = 0.8 each.
+    np.testing.assert_allclose(bands["p_conn"][5, 2:6], 0.8 ** np.arange(4), rtol=1e-6)

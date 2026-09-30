@@ -6,7 +6,7 @@ probabilities (WIP) along a path to the nearest flowline.
 
 | Method | Path | Status |
 | --- | --- | --- |
-| 1. `least-cost` | Most probable 8-connected path, ignoring topography | done |
+| 1. `least-cost` | Most probable 8-connected path, any direction or downstream-only | done |
 | 2. `flowpath` | D8 steepest-descent flow path | done |
 | 3. hybrid | Topography-aware but flexible | to discuss |
 | 4. circuit | All paths (Circuitscape-style) | to discuss |
@@ -21,9 +21,14 @@ pytest
 ## Usage
 
 ```bash
-# Method 1
+# Method 1, any direction (e.g. habitat connectivity)
 python -m wetconn least-cost --wip proctor_wip.tif --streams proctor_flowlines.gpkg \
-    -o proctor_least_cost.tif --ref-length 3 --min-wip 0.005
+    -o proctor_least_cost.tif --ref-length 3 --min-wip 0.005 --path-threshold 75
+
+# Method 1, downstream-only (water-borne transport)
+python -m wetconn least-cost --wip proctor_wip.tif --dem proctor_dem.tif \
+    --streams proctor_flowlines.gpkg -o proctor_least_cost_down.tif \
+    --ref-length 3 --min-wip 0.005 --path-threshold 75 --downstream-only
 
 # Method 2 (the DEM is resampled onto the WIP grid if it differs)
 python -m wetconn flowpath --wip proctor_wip.tif --dem proctor_dem.tif \
@@ -33,6 +38,7 @@ python -m wetconn flowpath --wip proctor_wip.tif --dem proctor_dem.tif \
 WIP stored as percent (0–100, as in `proctor_wip.tif`) is detected and divided
 by 100; `--wip-scale` sets the divisor explicitly. `--min-wip 0.005` is half
 the 1% rounding step: a stored 0 means "under 0.5%", not impossible.
+`--path-threshold 75` is in the raster's units (see below).
 
 Or from Python:
 
@@ -85,6 +91,15 @@ p_joint = wip_i · p_conn
   `--ref-length 3` for a 3 m native WIP). Then 1 m and 3 m grids charge the
   same cost for the same physical distance.
 
+### Path threshold
+
+`--path-threshold T` (for example the wetland mapping threshold, 75%)
+rescales the probability used **for travel only** to `min(wip / T, 1)`.
+Pixels at or above `T` cost nothing to cross, and pixels below it are
+charged by how far they fall short. The at-site term keeps the raw WIP, so
+`p_joint = wip_i · p_conn` is unchanged for pixels next to a stream and rises
+for pixels further out. `--min-wip` is applied before the rescaling.
+
 In the implementation, the edges between pixel centres are weighted
 `½(λ_a + λ_b)·d` with `λ = −ln(wip)/L₀` (the trapezoid rule, the same as
 ArcGIS Cost Distance and `skimage.graph.MCP_Geometric`). Afterwards the
@@ -101,6 +116,26 @@ covered by the at-site `wip_i` term.
   instead makes them passable at high cost.
 - **Nodata** in WIP is impassable and NaN in the output. Stream pixels
   connect even where WIP is nodata.
+
+### Downstream-only travel (method 1)
+
+`--downstream-only` (needs `--dem`) forbids any step toward the stream that
+climbs more than `--max-uphill-slope` × step length (default 0.01 = 1%).
+Expressing the tolerance as a slope keeps it the same at any resolution
+(3 cm per 3 m step, 1 cm per 1 m step). Level and downhill steps are always
+allowed. Without the flag, paths may go in any direction.
+
+- `--depressions fill` (default) uses the same filled DEM as method 2, so
+  closed depressions drain through their spill point. The ε tilt from the
+  fill (~10⁻¹⁴ m per cell) is far below the tolerance, so movement across a
+  filled pond is unrestricted. `--depressions sink` keeps pits; a pixel in
+  one is connected only if it can climb out within the slope tolerance, so
+  shallow noise pits stay connected and steep-walled depressions do not.
+- The tolerance applies per step, not in total: in valleys flatter than the
+  tolerance a path can travel up the valley floor indefinitely.
+- Pixels with no allowed path get `p_conn = 0`.
+- Costs are ordered: any-direction ≤ downstream-only ≤ method 2 (the D8
+  path is downhill on the same filled DEM). The tests check this.
 
 ### Method 2 specifics
 

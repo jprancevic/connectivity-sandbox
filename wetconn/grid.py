@@ -34,7 +34,7 @@ def pixel_size(transform):
     return abs(transform.a), abs(transform.e)
 
 
-def attenuation(wip, valid, ref_length, min_wip=0.0):
+def attenuation(wip, valid, ref_length, min_wip=0.0, threshold=1.0):
     """Per-unit-length cost ``-ln(wip) / ref_length``.
 
     ``ref_length`` is the distance over which a path through a pixel of
@@ -42,14 +42,21 @@ def attenuation(wip, valid, ref_length, min_wip=0.0):
     of length ``l`` through that pixel then carries probability
     ``p ** (l / ref_length)``, which is the same whatever the pixel size.
 
+    ``threshold`` rescales the probability used for travel to
+    ``min(wip / threshold, 1)``: pixels at or above it (e.g. the wetland
+    mapping threshold) cost nothing to cross. ``min_wip`` is applied first.
+
     Invalid pixels and pixels with ``wip == 0`` (below ``min_wip`` if given)
     get ``inf``, which makes them barriers.
     """
     if ref_length <= 0:
         raise ValueError("ref_length must be positive.")
+    if not 0 < threshold <= 1:
+        raise ValueError("threshold must be in (0, 1].")
     p = np.where(valid, np.minimum(wip, 1.0), np.nan).astype(np.float64)
     if min_wip > 0:
         p = np.where(valid, np.maximum(p, min_wip), np.nan)
+    p = np.minimum(p / threshold, 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         lam = -np.log(p) / ref_length
     lam[~valid] = np.inf

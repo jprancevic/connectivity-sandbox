@@ -115,6 +115,17 @@ def _priority_flood(z, valid, boundary, offsets):
     return out
 
 
+def fill_depressions(z, valid):
+    """Fill closed depressions to their spill point (Priority-Flood + epsilon).
+
+    Returns ``(filled, boundary)``. Filled cells are raised by the smallest
+    float64 steps toward the outlet, far below any real slope.
+    """
+    boundary = _boundary(valid, OFFSETS)
+    filled = _priority_flood(np.where(valid, z, np.nan), valid, boundary, OFFSETS)
+    return filled, boundary
+
+
 @njit(cache=True)
 def _d8(z, valid, offsets, lengths):
     """Steepest-descent receiver (flat index) and direction index per pixel."""
@@ -220,6 +231,7 @@ def flowpath_connectivity(
     depressions="fill",
     burn_depth=0.0,
     min_wip=0.0,
+    path_threshold=1.0,
 ):
     """Probability that each pixel is a wetland connected along its flow path.
 
@@ -259,12 +271,13 @@ def flowpath_connectivity(
     z = np.where(dem_valid, dem, np.nan)
     if burn_depth:
         z[streams & dem_valid] -= burn_depth
-    boundary = _boundary(dem_valid, OFFSETS)
     if depressions == "fill":
-        z = _priority_flood(z, dem_valid, boundary, OFFSETS)
+        z, boundary = fill_depressions(z, dem_valid)
+    else:
+        boundary = _boundary(dem_valid, OFFSETS)
     receiver, direction = _d8(z, dem_valid, OFFSETS, lengths)
 
-    lam = attenuation(wip, wip_valid, ref_length, min_wip)
+    lam = attenuation(wip, wip_valid, ref_length, min_wip, path_threshold)
     lam[streams] = 0.0
     targets = streams & dem_valid
     h, plen, lab, status = _accumulate(

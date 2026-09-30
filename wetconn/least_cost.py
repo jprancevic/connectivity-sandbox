@@ -1,13 +1,15 @@
-"""Method 1: most-probable path to the stream network, ignoring topography.
+"""Method 1: most-probable path to the stream network.
 
 For each pixel we find the 8-connected path to a stream pixel that maximises
 the product of wetland probabilities along the way, i.e. minimises the sum of
-``-ln(wip)`` weighted by the length travelled through each pixel.
+``-ln(wip)`` weighted by the length travelled through each pixel. Paths may
+run in any direction, or optionally only downhill/level toward the stream.
 """
 
 import numpy as np
 from numba import njit
 
+from .flowpath import fill_depressions
 from .grid import OFFSETS, attenuation, check_wip, step_lengths
 
 
@@ -48,12 +50,15 @@ def _sift_down(heap, pos, key, i, size):
 
 
 @njit(cache=True)
-def _dijkstra(lam, is_target, label, offsets, lengths):
+def _dijkstra(lam, is_target, label, z, max_rise, offsets, lengths):
     """Multi-source Dijkstra from the target pixels.
 
     Edge weight between neighbours a and b is ``0.5 * (lam[a] + lam[b]) * d``
     (trapezoid rule for the line integral of ``lam`` between pixel centres).
     ``lam`` must be 0 on targets; ``inf`` marks barriers.
+
+    A step toward the stream is only allowed if it rises by at most
+    ``max_rise * d``. With ``z`` all zeros every step is allowed.
 
     Returns the accumulated cost from each pixel centre to the nearest target
     centre, the length of that path, and the label of the target reached.
@@ -63,6 +68,7 @@ def _dijkstra(lam, is_target, label, offsets, lengths):
     lamf = lam.ravel()
     tgt = is_target.ravel()
     labf = label.ravel()
+    zf = z.ravel()
     cost = np.full(n, np.inf)
     plen = np.full(n, np.inf)
     lab = np.full(n, -1, np.int64)
@@ -103,6 +109,9 @@ def _dijkstra(lam, is_target, label, offsets, lengths):
             lv = lamf[v]
             if lv == np.inf:
                 continue
+            # Travel runs v -> u (toward the stream): limit the climb.
+            if zf[u] - zf[v] > max_rise * lengths[k]:
+                continue
             nd = cu + 0.5 * (lu + lv) * lengths[k]
             nl = plen[u] + lengths[k]
             if nd == cost[v] and nl < plen[v]:
@@ -125,7 +134,7 @@ def _dijkstra(lam, is_target, label, offsets, lengths):
 
 
 @njit(cache=True)
-def _exclude_source(cost, plen, lab, lam, is_target, offsets, lengths):
+def _exclude_source(cost, plen, lab, lam, is_target, z, max_rise, offsets, lengths):
     """Drop each pixel's own half-step from its path cost.
 
     ``cost`` (from ``_dijkstra``) includes half of the first step, spent
@@ -151,7 +160,7 @@ def _exclude_source(cost, plen, lab, lam, is_target, offsets, lengths):
                 if rr < 0 or rr >= nr or cc < 0 or cc >= nc:
                     continue
                 cm = cost[rr, cc]
-                if cm == np.inf:
+                if cm == np.inf or z[rr, cc] - z[r, c] > max_rise * lengths[k]:
                     continue
                 cand = cm + 0.5 * lam[rr, cc] * lengths[k]
                 cl = plen[rr, cc] + lengths[k]
@@ -172,6 +181,12 @@ def least_cost_connectivity(
     valid=None,
     labels=None,
     min_wip=0.0,
+    path_threshold=1.0,
+    dem=None,
+    dem_valid=None,
+    downstream_only=False,
+    max_uphill_slope=0.01,
+    depressions="fill",
 ):
     """Probability that each pixel is a wetland connected to the stream network.
 
@@ -188,6 +203,19 @@ def least_cost_connectivity(
     labels : 2-D int array of stream ids at stream pixels (default: 1).
     min_wip : optional floor on ``wip`` so zero-probability pixels become
         passable at high cost instead of acting as barriers.
+    path_threshold : probability at or above which a pixel costs nothing to
+        cross; travel uses ``min(wip / path_threshold, 1)``. The at-site term
+        in ``p_joint`` always uses the raw ``wip``.
+    dem, dem_valid : elevation on the same grid, needed for ``downstream_only``.
+    downstream_only : only allow paths that run downhill or level toward the
+        stream (water-borne transport). Default False: any direction
+        (e.g. habitat connectivity).
+    max_uphill_slope : with ``downstream_only``, the steepest climb (rise over
+        step length, 0.01 = 1%) a single step may make, to tolerate DEM noise.
+    depressions : with ``downstream_only``, ``"fill"`` fills closed
+        depressions to their spill point so they drain out; ``"sink"`` keeps
+        them, so pixels that can't climb out within ``max_uphill_slope``
+        are not connected.
 
     Returns
     -------
@@ -209,13 +237,25 @@ def least_cost_connectivity(
     labels = np.asarray(labels, dtype=np.int64)
     check_wip(wip, valid)
 
-    lam = attenuation(wip, valid, ref_length, min_wip)
+    if downstream_only:
+        if dem is None:
+            raise ValueError("downstream_only needs a dem.")
+        z, dem_valid = _condition_dem(dem, dem_valid, streams, depressions)
+        valid = valid & dem_valid
+        max_rise = float(max_uphill_slope)
+    else:
+        z = np.zeros(wip.shape)
+        max_rise = 0.0
+
+    lam = attenuation(wip, valid, ref_length, min_wip, path_threshold)
     # Stream pixels are connected by definition, even where wip is missing.
     lam[streams] = 0.0
 
     lengths = step_lengths(dx, dy)
-    cost, plen, lab = _dijkstra(lam, streams, labels, OFFSETS, lengths)
-    h, hl, hlab = _exclude_source(cost, plen, lab, lam, streams, OFFSETS, lengths)
+    cost, plen, lab = _dijkstra(lam, streams, labels, z, max_rise, OFFSETS, lengths)
+    h, hl, hlab = _exclude_source(
+        cost, plen, lab, lam, streams, z, max_rise, OFFSETS, lengths
+    )
 
     out_mask = ~(valid | streams)
     p_conn = np.exp(-h)
@@ -231,3 +271,23 @@ def least_cost_connectivity(
         arr[out_mask] = np.nan
     return result
 
+
+def _condition_dem(dem, dem_valid, streams, depressions):
+    """Elevations for the downstream-only rule.
+
+    Stream pixels without DEM data are set to ``-inf`` so they can always be
+    stepped into; other nodata pixels are left NaN (they are barriers anyway).
+    """
+    dem = np.asarray(dem, dtype=np.float64)
+    if dem.shape != streams.shape:
+        raise ValueError("wip and dem must be on the same grid.")
+    if dem_valid is None:
+        dem_valid = np.isfinite(dem)
+    if depressions == "fill":
+        z, _ = fill_depressions(dem, dem_valid)
+    elif depressions == "sink":
+        z = np.where(dem_valid, dem, np.nan)
+    else:
+        raise ValueError("depressions must be 'fill' or 'sink'.")
+    z[streams & ~dem_valid] = -np.inf
+    return z, dem_valid

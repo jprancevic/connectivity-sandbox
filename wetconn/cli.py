@@ -41,6 +41,14 @@ def _common(p):
         help="Rasterize flowlines through pixel centres only, not every touched pixel.",
     )
     p.add_argument(
+        "--path-threshold",
+        type=float,
+        default=None,
+        help="WIP (in the raster's units, e.g. 75) at or above which a pixel costs "
+        "nothing to cross. Travel uses min(wip / threshold, 1); p_joint still uses "
+        "the raw wip. Default: no rescaling.",
+    )
+    p.add_argument(
         "--min-wip",
         type=float,
         default=0.0,
@@ -54,17 +62,34 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="wetconn", description=__doc__)
     sub = parser.add_subparsers(dest="method", required=True)
 
-    lc = sub.add_parser("least-cost", help="Method 1: most-probable path, no topography.")
+    dem_help = "DEM; resampled onto the wip grid if needed."
+    depressions_help = "fill: drain through spill points; sink: pits disconnect (default fill)."
+
+    lc = sub.add_parser("least-cost", help="Method 1: most-probable path.")
     _common(lc)
+    lc.add_argument("--dem", help=dem_help + " Required with --downstream-only.")
+    lc.add_argument(
+        "--downstream-only",
+        action="store_true",
+        help="Only allow paths that run downhill or level toward the stream "
+        "(water-borne transport). Default: any direction (e.g. habitat).",
+    )
+    lc.add_argument(
+        "--max-uphill-slope",
+        type=float,
+        default=0.01,
+        help="With --downstream-only, the steepest climb one step may make "
+        "(rise / step length; default 0.01 = 1%%) to tolerate DEM noise.",
+    )
+    lc.add_argument(
+        "--depressions", choices=("fill", "sink"), default="fill", help=depressions_help
+    )
 
     fp = sub.add_parser("flowpath", help="Method 2: D8 steepest-descent flow path.")
     _common(fp)
-    fp.add_argument("--dem", required=True, help="DEM; resampled onto the wip grid if needed.")
+    fp.add_argument("--dem", required=True, help=dem_help)
     fp.add_argument(
-        "--depressions",
-        choices=("fill", "sink"),
-        default="fill",
-        help="fill: route through spill points; sink: pits disconnect (default fill).",
+        "--depressions", choices=("fill", "sink"), default="fill", help=depressions_help
     )
     fp.add_argument(
         "--burn-depth",
@@ -74,6 +99,8 @@ def main(argv=None):
     )
 
     args = parser.parse_args(argv)
+    if args.method == "least-cost" and args.downstream_only and not args.dem:
+        parser.error("--downstream-only needs --dem.")
     t0 = time.perf_counter()
 
     wip, valid, profile = io.read_raster(args.wip)
@@ -86,6 +113,12 @@ def main(argv=None):
         if scale != 1:
             print(f"wip values run to {top:g}; treating them as percent (--wip-scale 100)")
     wip = wip / scale
+    path_threshold = 1.0 if args.path_threshold is None else args.path_threshold / scale
+    if not 0 < path_threshold <= 1:
+        parser.error(
+            f"--path-threshold {args.path_threshold:g} is outside the wip range "
+            f"(0, {scale:g}]."
+        )
     dx, dy = pixel_size(profile["transform"])
     ref_length = float(np.sqrt(dx * dy)) if args.ref_length is None else args.ref_length
     streams, labels = io.rasterize_streams(
@@ -105,11 +138,29 @@ def main(argv=None):
         "ref_length": ref_length,
         "wip_scale": scale,
         "min_wip": args.min_wip,
+        "path_threshold": path_threshold,
     }
     if args.method == "least-cost":
+        dem, dem_valid = io.read_aligned(args.dem, profile) if args.dem else (None, None)
         result = least_cost_connectivity(
-            wip, streams, dx, dy, ref_length, valid, labels, args.min_wip
+            wip,
+            streams,
+            dx,
+            dy,
+            ref_length,
+            valid,
+            labels,
+            args.min_wip,
+            path_threshold,
+            dem,
+            dem_valid,
+            downstream_only=args.downstream_only,
+            max_uphill_slope=args.max_uphill_slope,
+            depressions=args.depressions,
         )
+        tags.update(downstream_only=args.downstream_only)
+        if args.downstream_only:
+            tags.update(max_uphill_slope=args.max_uphill_slope, depressions=args.depressions)
     else:
         dem, dem_valid = io.read_aligned(args.dem, profile)
         result = flowpath_connectivity(
@@ -125,6 +176,7 @@ def main(argv=None):
             depressions=args.depressions,
             burn_depth=args.burn_depth,
             min_wip=args.min_wip,
+            path_threshold=path_threshold,
         )
         tags.update(depressions=args.depressions, burn_depth=args.burn_depth)
         status = result["status"]
