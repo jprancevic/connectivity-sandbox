@@ -8,8 +8,7 @@ probabilities (WIP) along a path to the nearest flowline.
 | --- | --- | --- |
 | 1. `least-cost` | Most probable 8-connected path, any direction or downstream-only | done |
 | 2. `flowpath` | D8 steepest-descent flow path | done |
-| 3. hybrid | Topography-aware but flexible | to discuss |
-| 4. circuit | All paths (Circuitscape-style) | to discuss |
+| 3. `all-paths` | Probability that any wetland route exists (Monte Carlo), any direction or downstream-only | done |
 
 ## Setup
 
@@ -40,6 +39,12 @@ by 100; `--wip-scale` sets the divisor explicitly. `--min-wip 0.005` is half
 the 1% rounding step: a stored 0 means "under 0.5%", not impossible.
 `--path-threshold 75` is in the raster's units (see below).
 
+```bash
+# Method 3: any route (add --dem ... --downstream-only for water-borne transport)
+python -m wetconn all-paths --wip proctor_wip.tif --streams proctor_flowlines.gpkg \
+    -o proctor_all_paths.tif --min-wip 0.005 --path-threshold 75 --n-sims 500 --seed 0
+```
+
 Or from Python:
 
 ```python
@@ -58,6 +63,9 @@ Both write a float32 GeoTIFF with named bands:
 | `path_length` | Length of the chosen path (m) |
 | `reach_id` | `REACH_ID` of the flowline reached (use `--id-field` for another attribute) |
 | `status` | (flowpath only) 1 reaches stream, 2 leaves domain, 3 ends in a pit |
+| `p_conn_se` | (all-paths only) Monte Carlo standard error of `p_conn` |
+
+All-paths writes only `p_joint`, `p_conn` and `p_conn_se`.
 
 The CLI also prints the expected wetland area (Σ wip × pixel area) and the
 expected *connected* wetland area (Σ p_joint × pixel area).
@@ -136,6 +144,37 @@ allowed. Without the flag, paths may go in any direction.
 - Pixels with no allowed path get `p_conn = 0`.
 - Costs are ordered: any-direction ≤ downstream-only ≤ method 2 (the D8
   path is downhill on the same filled DEM). The tests check this.
+
+### Method 3: all paths (Monte Carlo)
+
+Methods 1–2 score a single route. Method 3 asks whether *any* wetland route
+exists, so several routes, or a wide corridor, raise the probability: two
+separate routes that each exist half the time give 0.75.
+
+- Each of `--n-sims` random maps draws one number per pixel. A pixel is
+  passable if the number is below `min(wip / T, 1)` (with `--min-wip` applied
+  first); stream pixels always are.
+- A pixel is connected in a map if it is a stream pixel or one of its 8
+  neighbours is joined to a stream by passable pixels (with the same
+  per-step slope rule under `--downstream-only`). That is what would happen
+  if the pixel were wetland, so `p_conn` is the fraction of maps where it
+  holds, and `p_joint = wip × p_conn` exactly.
+- The standard error is at most `0.5/√n` (±0.022 for 500 maps). `--seed`
+  makes runs repeatable. A map's random numbers are drawn only where the
+  search from the streams reaches, so a run takes ~20 s on Proctor.
+- Pixels are independent, which matches method 1 with `ref_length` equal to
+  the pixel size; `--ref-length` does not apply. A diagonal step crosses one
+  pixel, like an orthogonal one.
+- `p_conn` is never below method 1's (tests check this, within the noise).
+
+**Percolation caveat.** With independent pixels, connection has a tipping
+point: once more than ~41% of pixels are passable (8-neighbour site
+percolation), passable clusters span arbitrarily far. With `T = 0.75` that is
+WIP ≈ 0.30. On a uniform field, WIP 0.30 connects with probability ≈ 0.6 at
+90 m and WIP 0.35 with ≈ 0.97 at 300 m, where method 1 gives ~10⁻¹⁰ and
+below. Real WIP is spatially correlated (a 40% patch tends to be wet or dry
+as a whole), so independent maps likely overstate connection through broad
+moderate-WIP areas. Correlated random maps would address this.
 
 ### Method 2 specifics
 

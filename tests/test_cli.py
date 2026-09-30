@@ -111,3 +111,18 @@ def test_least_cost_downstream_cli(tmp_path):
     # DEM slopes down to the stream, so every pixel connects as before, with
     # travel through 0.6 pixels at 0.6 / 0.75 = 0.8 each.
     np.testing.assert_allclose(bands["p_conn"][5, 2:6], 0.8 ** np.arange(4), rtol=1e-6)
+
+
+def test_all_paths_cli(tmp_path):
+    d = _inputs(tmp_path)
+    out = d / "ap.tif"
+    main(
+        ["all-paths", "--wip", str(d / "wip.tif"), "--streams", str(d / "streams.gpkg"),
+         "-o", str(out), "--centre-only", "--n-sims", "200", "--seed", "3",
+         "--dem", str(d / "dem.tif"), "--downstream-only"]
+    )
+    bands, tags = _read(out)
+    assert list(bands) == ["p_joint", "p_conn", "p_conn_se"]
+    assert tags["n_sims"] == "200" and tags["seed"] == "3" and tags["downstream_only"] == "True"
+    assert np.all(bands["p_conn"][2:-2, 1] == 1.0)  # stream column
+    assert np.all(bands["p_conn"][2:-2, 2] >= 0.6)  # three routes of 0.6 each

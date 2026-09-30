@@ -6,12 +6,13 @@ import time
 import numpy as np
 
 from . import io
+from .all_paths import all_paths_connectivity
 from .flowpath import flowpath_connectivity
 from .grid import pixel_size
 from .least_cost import least_cost_connectivity
 
 
-def _common(p):
+def _common(p, ref_length=True):
     p.add_argument("--wip", required=True, help="Wetland probability raster.")
     p.add_argument(
         "--wip-scale",
@@ -22,13 +23,14 @@ def _common(p):
     )
     p.add_argument("--streams", required=True, help="Flowline vector file.")
     p.add_argument("-o", "--out", required=True, help="Output GeoTIFF.")
-    p.add_argument(
-        "--ref-length",
-        type=float,
-        default=None,
-        help="Length (map units) over which one pixel's wip applies once. "
-        "Default: the pixel size. Fix it (e.g. 3) to compare resolutions.",
-    )
+    if ref_length:
+        p.add_argument(
+            "--ref-length",
+            type=float,
+            default=None,
+            help="Length (map units) over which one pixel's wip applies once. "
+            "Default: the pixel size. Fix it (e.g. 3) to compare resolutions.",
+        )
     p.add_argument("--layer", default=None, help="Layer name in the streams file.")
     p.add_argument(
         "--id-field",
@@ -65,25 +67,28 @@ def main(argv=None):
     dem_help = "DEM; resampled onto the wip grid if needed."
     depressions_help = "fill: drain through spill points; sink: pits disconnect (default fill)."
 
+    def downstream_args(p):
+        p.add_argument("--dem", help=dem_help + " Required with --downstream-only.")
+        p.add_argument(
+            "--downstream-only",
+            action="store_true",
+            help="Only allow paths that run downhill or level toward the stream "
+            "(water-borne transport). Default: any direction (e.g. habitat).",
+        )
+        p.add_argument(
+            "--max-uphill-slope",
+            type=float,
+            default=0.01,
+            help="With --downstream-only, the steepest climb one step may make "
+            "(rise / step length; default 0.01 = 1%%) to tolerate DEM noise.",
+        )
+        p.add_argument(
+            "--depressions", choices=("fill", "sink"), default="fill", help=depressions_help
+        )
+
     lc = sub.add_parser("least-cost", help="Method 1: most-probable path.")
     _common(lc)
-    lc.add_argument("--dem", help=dem_help + " Required with --downstream-only.")
-    lc.add_argument(
-        "--downstream-only",
-        action="store_true",
-        help="Only allow paths that run downhill or level toward the stream "
-        "(water-borne transport). Default: any direction (e.g. habitat).",
-    )
-    lc.add_argument(
-        "--max-uphill-slope",
-        type=float,
-        default=0.01,
-        help="With --downstream-only, the steepest climb one step may make "
-        "(rise / step length; default 0.01 = 1%%) to tolerate DEM noise.",
-    )
-    lc.add_argument(
-        "--depressions", choices=("fill", "sink"), default="fill", help=depressions_help
-    )
+    downstream_args(lc)
 
     fp = sub.add_parser("flowpath", help="Method 2: D8 steepest-descent flow path.")
     _common(fp)
@@ -98,8 +103,21 @@ def main(argv=None):
         help="Lower stream pixels by this many DEM units before routing.",
     )
 
+    ap = sub.add_parser(
+        "all-paths", help="Method 3: probability that any wetland route exists (Monte Carlo)."
+    )
+    _common(ap, ref_length=False)
+    downstream_args(ap)
+    ap.add_argument(
+        "--n-sims",
+        type=int,
+        default=500,
+        help="Number of random wetland maps (default 500; standard error <= 0.5/sqrt(n)).",
+    )
+    ap.add_argument("--seed", type=int, default=0, help="Random seed (default 0).")
+
     args = parser.parse_args(argv)
-    if args.method == "least-cost" and args.downstream_only and not args.dem:
+    if args.method != "flowpath" and args.downstream_only and not args.dem:
         parser.error("--downstream-only needs --dem.")
     t0 = time.perf_counter()
 
@@ -120,7 +138,12 @@ def main(argv=None):
             f"(0, {scale:g}]."
         )
     dx, dy = pixel_size(profile["transform"])
-    ref_length = float(np.sqrt(dx * dy)) if args.ref_length is None else args.ref_length
+    if args.method == "all-paths":
+        ref_length = float(np.sqrt(dx * dy))  # pixels are independent
+    elif args.ref_length is None:
+        ref_length = float(np.sqrt(dx * dy))
+    else:
+        ref_length = args.ref_length
     streams, labels = io.rasterize_streams(
         args.streams,
         profile,
@@ -158,9 +181,25 @@ def main(argv=None):
             max_uphill_slope=args.max_uphill_slope,
             depressions=args.depressions,
         )
-        tags.update(downstream_only=args.downstream_only)
-        if args.downstream_only:
-            tags.update(max_uphill_slope=args.max_uphill_slope, depressions=args.depressions)
+    elif args.method == "all-paths":
+        dem, dem_valid = io.read_aligned(args.dem, profile) if args.dem else (None, None)
+        result = all_paths_connectivity(
+            wip,
+            streams,
+            dx,
+            dy,
+            valid,
+            args.min_wip,
+            path_threshold,
+            dem,
+            dem_valid,
+            downstream_only=args.downstream_only,
+            max_uphill_slope=args.max_uphill_slope,
+            depressions=args.depressions,
+            n_sims=args.n_sims,
+            seed=args.seed,
+        )
+        tags.update(n_sims=args.n_sims, seed=args.seed)
     else:
         dem, dem_valid = io.read_aligned(args.dem, profile)
         result = flowpath_connectivity(
@@ -183,6 +222,10 @@ def main(argv=None):
         for code, name in [(1, "reach stream"), (2, "leave domain"), (3, "end in pit")]:
             print(f"  {np.mean(status[valid] == code):6.1%} of pixels {name}")
 
+    if args.method != "flowpath":
+        tags.update(downstream_only=args.downstream_only)
+        if args.downstream_only:
+            tags.update(max_uphill_slope=args.max_uphill_slope, depressions=args.depressions)
     io.write_bands(args.out, profile, result, tags)
 
     area = dx * dy / 1e4

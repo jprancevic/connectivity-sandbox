@@ -240,7 +240,7 @@ def least_cost_connectivity(
     if downstream_only:
         if dem is None:
             raise ValueError("downstream_only needs a dem.")
-        z, dem_valid = _condition_dem(dem, dem_valid, streams, depressions)
+        z, dem_valid = downstream_elevations(dem, dem_valid, streams, depressions)
         valid = valid & dem_valid
         max_rise = float(max_uphill_slope)
     else:
@@ -272,7 +272,7 @@ def least_cost_connectivity(
     return result
 
 
-def _condition_dem(dem, dem_valid, streams, depressions):
+def downstream_elevations(dem, dem_valid, streams, depressions):
     """Elevations for the downstream-only rule.
 
     Stream pixels without DEM data are set to ``-inf`` so they can always be
