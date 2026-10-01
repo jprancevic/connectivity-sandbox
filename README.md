@@ -9,6 +9,7 @@ probabilities (WIP) along a path to the nearest flowline.
 | 1. `least-cost` | Most probable 8-connected path, any direction or downstream-only | done |
 | 2. `flowpath` | D8 steepest-descent flow path | done |
 | 3. `all-paths` | Probability that any wetland route exists (Monte Carlo), any direction or downstream-only | done |
+| 4. `threshold` | Highest WIP threshold at which a pixel is wet and connected, any direction or downstream-only | done |
 
 ## Setup
 
@@ -45,6 +46,12 @@ python -m wetconn all-paths --wip proctor_wip.tif --streams proctor_flowlines.gp
     -o proctor_all_paths.tif --min-wip 0.005 --path-threshold 75 --n-sims 500 --seed 0
 ```
 
+```bash
+# Method 4: WIP as a wetting threshold (add --dem ... --downstream-only as above)
+python -m wetconn threshold --wip proctor_wip.tif --streams proctor_flowlines.gpkg \
+    -o proctor_threshold.tif
+```
+
 Or from Python:
 
 ```python
@@ -65,7 +72,8 @@ Both write a float32 GeoTIFF with named bands:
 | `status` | (flowpath only) 1 reaches stream, 2 leaves domain, 3 ends in a pit |
 | `p_conn_se` | (all-paths only) Monte Carlo standard error of `p_conn` |
 
-All-paths writes only `p_joint`, `p_conn` and `p_conn_se`.
+All-paths writes only `p_joint`, `p_conn` and `p_conn_se`. Threshold writes
+`threshold`, `route_threshold` and `reach_id` (see method 4 below).
 
 The CLI also prints the expected wetland area (Σ wip × pixel area) and the
 expected *connected* wetland area (Σ p_joint × pixel area).
@@ -175,6 +183,29 @@ WIP ≈ 0.30. On a uniform field, WIP 0.30 connects with probability ≈ 0.6 at
 below. Real WIP is spatially correlated (a 40% patch tends to be wet or dry
 as a whole), so independent maps likely overstate connection through broad
 moderate-WIP areas. Correlated random maps would address this.
+
+### Method 4: wetting threshold
+
+WIP is read as the condition needed to wet a pixel: at threshold `t` every
+pixel with `wip ≥ t` is wet. Stepping `t` down wets more of the landscape,
+and a pixel connects once it and some route of wet pixels to a stream are
+all at or above `t`.
+
+- `threshold` is the highest `t` at which the pixel is wet and connected:
+  the lowest WIP on its best route, including the pixel itself. The
+  connected wetland map at any cutoff is simply `threshold ≥ t`, e.g.
+  `threshold ≥ 0.75` for the 75% mapping threshold.
+- `route_threshold` leaves the pixel itself out: the cutoff at which it
+  would connect if it were wet (1 next to a stream). Where `threshold` is
+  below the pixel's own WIP, the route is the limit.
+- `reach_id` is the stream the best route reaches; among equally good
+  routes, the shortest.
+- One priority flood from the streams gives the exact answer for every
+  cutoff at once; the tests check it against building a binary map at each
+  WIP level. Values are 0–1 like the other outputs.
+- `--downstream-only` uses the same per-step slope rule and filled DEM as
+  methods 1 and 3. Pixels with no allowed route at any cutoff get `-1`.
+- `--ref-length`, `--path-threshold` and `--min-wip` don't apply.
 
 ### Method 2 specifics
 

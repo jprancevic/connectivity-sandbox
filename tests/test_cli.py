@@ -126,3 +126,23 @@ def test_all_paths_cli(tmp_path):
     assert tags["n_sims"] == "200" and tags["seed"] == "3" and tags["downstream_only"] == "True"
     assert np.all(bands["p_conn"][2:-2, 1] == 1.0)  # stream column
     assert np.all(bands["p_conn"][2:-2, 2] >= 0.6)  # three routes of 0.6 each
+
+
+def test_threshold_cli(tmp_path):
+    d = _inputs(tmp_path)
+    wip = np.full((40, 40), 60, np.uint8)
+    wip[:, 5] = 40  # a weaker band crossing every route
+    _write(d / "wip_pct.tif", wip, nodata=255, dtype="uint8")
+    out = d / "th.tif"
+    main(
+        ["threshold", "--wip", str(d / "wip_pct.tif"), "--streams", str(d / "streams.gpkg"),
+         "-o", str(out), "--centre-only"]
+    )
+    bands, tags = _read(out)
+    assert list(bands) == ["threshold", "route_threshold", "reach_id"]
+    assert tags["method"] == "threshold" and "ref_length" not in tags
+    np.testing.assert_allclose(bands["threshold"][5, 1:5], 0.6)
+    np.testing.assert_allclose(bands["threshold"][5, 5:], 0.4)
+    with pytest.raises(SystemExit):  # travel options don't apply here
+        main(["threshold", "--wip", str(d / "wip_pct.tif"), "--streams",
+              str(d / "streams.gpkg"), "-o", str(out), "--path-threshold", "75"])

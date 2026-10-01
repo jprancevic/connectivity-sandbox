@@ -10,9 +10,10 @@ from .all_paths import all_paths_connectivity
 from .flowpath import flowpath_connectivity
 from .grid import pixel_size
 from .least_cost import least_cost_connectivity
+from .threshold import NEVER, threshold_connectivity
 
 
-def _common(p, ref_length=True):
+def _common(p, ref_length=True, travel=True):
     p.add_argument("--wip", required=True, help="Wetland probability raster.")
     p.add_argument(
         "--wip-scale",
@@ -42,6 +43,9 @@ def _common(p, ref_length=True):
         action="store_true",
         help="Rasterize flowlines through pixel centres only, not every touched pixel.",
     )
+    if not travel:
+        p.set_defaults(path_threshold=None, min_wip=0.0)
+        return
     p.add_argument(
         "--path-threshold",
         type=float,
@@ -116,6 +120,13 @@ def main(argv=None):
     )
     ap.add_argument("--seed", type=int, default=0, help="Random seed (default 0).")
 
+    th = sub.add_parser(
+        "threshold",
+        help="Method 4: highest WIP threshold at which each pixel is wet and connected.",
+    )
+    _common(th, ref_length=False, travel=False)
+    downstream_args(th)
+
     args = parser.parse_args(argv)
     if args.method != "flowpath" and args.downstream_only and not args.dem:
         parser.error("--downstream-only needs --dem.")
@@ -138,12 +149,9 @@ def main(argv=None):
             f"(0, {scale:g}]."
         )
     dx, dy = pixel_size(profile["transform"])
-    if args.method == "all-paths":
-        ref_length = float(np.sqrt(dx * dy))  # pixels are independent
-    elif args.ref_length is None:
+    ref_length = getattr(args, "ref_length", None)
+    if ref_length is None:
         ref_length = float(np.sqrt(dx * dy))
-    else:
-        ref_length = args.ref_length
     streams, labels = io.rasterize_streams(
         args.streams,
         profile,
@@ -151,18 +159,15 @@ def main(argv=None):
         layer=args.layer,
         all_touched=not args.centre_only,
     )
+    ref_note = "" if args.method == "threshold" else f"ref_length {ref_length:g}, "
     print(
         f"grid {wip.shape[0]} x {wip.shape[1]}, pixel {dx:g} x {dy:g}, "
-        f"ref_length {ref_length:g}, {streams.sum()} stream pixels"
+        f"{ref_note}{streams.sum()} stream pixels"
     )
 
-    tags = {
-        "method": args.method,
-        "ref_length": ref_length,
-        "wip_scale": scale,
-        "min_wip": args.min_wip,
-        "path_threshold": path_threshold,
-    }
+    tags = {"method": args.method, "wip_scale": scale}
+    if args.method != "threshold":
+        tags.update(ref_length=ref_length, min_wip=args.min_wip, path_threshold=path_threshold)
     if args.method == "least-cost":
         dem, dem_valid = io.read_aligned(args.dem, profile) if args.dem else (None, None)
         result = least_cost_connectivity(
@@ -200,6 +205,21 @@ def main(argv=None):
             seed=args.seed,
         )
         tags.update(n_sims=args.n_sims, seed=args.seed)
+    elif args.method == "threshold":
+        dem, dem_valid = io.read_aligned(args.dem, profile) if args.dem else (None, None)
+        result = threshold_connectivity(
+            wip,
+            streams,
+            dx,
+            dy,
+            valid,
+            labels,
+            dem,
+            dem_valid,
+            downstream_only=args.downstream_only,
+            max_uphill_slope=args.max_uphill_slope,
+            depressions=args.depressions,
+        )
     else:
         dem, dem_valid = io.read_aligned(args.dem, profile)
         result = flowpath_connectivity(
@@ -229,10 +249,21 @@ def main(argv=None):
     io.write_bands(args.out, profile, result, tags)
 
     area = dx * dy / 1e4
-    print(
-        f"expected wetland area {np.nansum(wip[valid]) * area:.1f} ha, "
-        f"connected {np.nansum(result['p_joint']) * area:.1f} ha"
-    )
+    if args.method == "threshold":
+        t = result["threshold"]
+        never = np.sum(valid & (t == NEVER))
+        if never:
+            print(f"  {never / valid.sum():.1%} of pixels have no allowed route to a stream")
+        for level in (0.75, 0.5, 0.25):
+            print(
+                f"at wip >= {level * scale:g}: wetland {np.sum(valid & (wip >= level)) * area:.1f} ha, "
+                f"connected {np.sum(t >= level) * area:.1f} ha"
+            )
+    else:
+        print(
+            f"expected wetland area {np.nansum(wip[valid]) * area:.1f} ha, "
+            f"connected {np.nansum(result['p_joint']) * area:.1f} ha"
+        )
     print(f"wrote {args.out} in {time.perf_counter() - t0:.1f} s")
 
 
