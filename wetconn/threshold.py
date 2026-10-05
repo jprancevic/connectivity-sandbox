@@ -224,3 +224,92 @@ def threshold_connectivity(
     for arr in result.values():
         arr[out_mask] = np.nan
     return result
+
+
+def focal_mean(wip, valid, size):
+    """Mean of the valid pixels in a ``size`` x ``size`` window around each pixel.
+
+    Nodata and pixels beyond the raster edge are left out of the mean, so
+    windows near the edge of the domain average fewer pixels. Invalid pixels
+    stay NaN. Uses summed-area tables, so the cost doesn't grow with ``size``.
+    """
+    if size < 1 or size % 2 == 0:
+        raise ValueError("window size must be a positive odd number of pixels.")
+    if size == 1:
+        return np.where(valid, wip, np.nan)
+
+    def box_sum(a):
+        h = size // 2
+        s = np.pad(np.pad(a, h).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+        return s[size:, size:] - s[:-size, size:] - s[size:, :-size] + s[:-size, :-size]
+
+    total = box_sum(np.where(valid, wip, 0.0))
+    count = box_sum(valid.astype(np.float64))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.clip(total / count, 0.0, 1.0)
+    return np.where(valid, mean, np.nan)
+
+
+def multiscale_threshold(
+    wip,
+    streams,
+    dx,
+    dy,
+    windows=(1, 3, 5, 7, 9, 11, 13, 15, 17),
+    valid=None,
+    labels=None,
+    on_window=None,
+    **kwargs,
+):
+    """Connection threshold with routes judged on focal means of growing size.
+
+    For each window size ``k`` the route to the stream is evaluated on the
+    ``k`` x ``k`` focal mean of ``wip``, so short dry breaks inside wetter
+    ground are averaged over. The pixel itself always uses its raw ``wip``:
+    ``threshold_k = min(wip, route_threshold on the focal mean)``, so no
+    scale can exceed the pixel's own value. Window 1 is the plain method.
+
+    ``on_window(k, result)`` is called after each scale with that scale's
+    ``threshold``, ``route_threshold``, ``reach_id`` and ``wip_avg``, so
+    callers can write each one out without keeping them all in memory.
+    Other keyword arguments go to ``threshold_connectivity``.
+
+    Returns
+    -------
+    dict of 2-D float arrays:
+        ``threshold``  the highest threshold over all scales.
+        ``window``     the smallest window (pixels) that achieves it.
+        ``reach_id``   the stream reached at that window.
+    """
+    wip = np.asarray(wip, dtype=np.float64)
+    streams = np.asarray(streams, dtype=bool)
+    if valid is None:
+        valid = np.isfinite(wip)
+    raw = np.where(valid, np.minimum(wip, 1.0), np.nan)
+
+    best = best_window = best_reach = None
+    for size in sorted(set(windows)):
+        avg = focal_mean(wip, valid, size)
+        r = threshold_connectivity(avg, streams, dx, dy, valid, labels, **kwargs)
+        route = r["route_threshold"]
+        threshold = np.where(route == NEVER, NEVER, np.minimum(raw, route))
+        threshold[np.isnan(route)] = np.nan
+        threshold[streams] = raw[streams]
+        result = {
+            "threshold": threshold,
+            "route_threshold": route,
+            "reach_id": r["reach_id"],
+            "wip_avg": avg,
+        }
+        if on_window is not None:
+            on_window(size, result)
+        if best is None:
+            best = threshold.copy()
+            best_window = np.where(np.isnan(threshold), np.nan, float(size))
+            best_reach = r["reach_id"].copy()
+        else:
+            better = threshold > best  # strict: ties keep the smaller window
+            best[better] = threshold[better]
+            best_window[better] = size
+            best_reach[better] = r["reach_id"][better]
+    return {"threshold": best, "window": best_window, "reach_id": best_reach}

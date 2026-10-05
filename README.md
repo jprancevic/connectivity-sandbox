@@ -207,6 +207,18 @@ all at or above `t`.
   methods 1 and 3. Pixels with no allowed route at any cutoff get `-1`.
 - `--ref-length`, `--path-threshold` and `--min-wip` don't apply.
 
+**Multiple scales.** `--windows 1 3 5 ... 17` repeats the analysis with
+routes judged on the focal mean of WIP over each window (nodata and pixels
+beyond the edge left out of the mean). The pixel itself keeps its raw WIP,
+so no scale can exceed it: `threshold_k = min(wip, route on the k×k mean)`.
+Each window is written to `<out>_wNN.tif` (bands `threshold`,
+`route_threshold`, `reach_id`, `wip_avg`) and `--out` holds the highest
+threshold over all windows plus the smallest `window` that reaches it. Each
+focal mean is computed on the fly with summed-area tables and only the
+running best is kept, so memory doesn't grow with the number of windows.
+Averaging bridges dry gaps inside broad wet ground but also dilutes narrow
+wet strips with the drier ground beside them.
+
 ### Method 2 specifics
 
 - Steepest descent uses slope = drop / true step length, so diagonals are

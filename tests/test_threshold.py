@@ -114,3 +114,65 @@ def test_reach_id_follows_best_route():
     r = threshold_connectivity(wip, streams, 1, 1, labels=labels)
     assert np.all(r["reach_id"][:, 7:] == 9)
     assert np.all(r["reach_id"][:, 1:3] == 7)
+
+
+def _broken_band():
+    # A 5-row band of 0.8 (rows 2-6, stream column included) cut by one dry
+    # column at col 6; zeros elsewhere.
+    wip = np.zeros((9, 13))
+    wip[2:7, :] = 0.8
+    wip[2:7, 6] = 0.0
+    return wip
+
+
+def test_focal_mean_ignores_nodata_and_edges():
+    from wetconn.threshold import focal_mean
+
+    rng = np.random.default_rng(0)
+    wip = rng.uniform(0, 1, (9, 11))
+    valid = rng.uniform(size=wip.shape) > 0.15
+    wip[~valid] = np.nan
+    for k in (3, 5):
+        h = k // 2
+        expected = np.full(wip.shape, np.nan)
+        for i, j in zip(*np.nonzero(valid)):
+            expected[i, j] = np.nanmean(wip[max(0, i - h) : i + h + 1, max(0, j - h) : j + h + 1])
+        np.testing.assert_allclose(focal_mean(wip, valid, k), expected, atol=1e-12)
+
+
+def test_multiscale_window_one_is_the_plain_method():
+    from wetconn.threshold import multiscale_threshold
+
+    rng = np.random.default_rng(3)
+    wip = rng.integers(0, 21, (15, 18)) / 20
+    s = _column_stream(wip.shape)
+    plain = threshold_connectivity(wip, s, 1, 1)
+    multi = multiscale_threshold(wip, s, 1, 1, windows=[1])
+    np.testing.assert_array_equal(multi["threshold"], plain["threshold"])
+    assert np.all(multi["window"] == 1)
+
+
+def test_multiscale_bridges_a_one_pixel_break():
+    from wetconn.threshold import multiscale_threshold
+
+    wip = _broken_band()
+    seen = {}
+    r = multiscale_threshold(
+        wip, _column_stream(wip.shape), 1, 1, windows=[1, 3, 5, 7],
+        on_window=lambda k, res: seen.__setitem__(k, res["threshold"][4, 10]),
+    )
+    assert list(seen) == [1, 3, 5, 7]
+    np.testing.assert_allclose(
+        [seen[1], seen[3], seen[5], seen[7]], [0.0, 0.8 * 6 / 9, 0.8 * 20 / 25, 0.8 * 30 / 49]
+    )
+    assert r["threshold"][4, 10] == pytest.approx(0.64) and r["window"][4, 10] == 5
+
+
+def test_multiscale_never_exceeds_raw_wip_and_ties_keep_smallest_window():
+    from wetconn.threshold import multiscale_threshold
+
+    wip = _broken_band()
+    r = multiscale_threshold(wip, _column_stream(wip.shape), 1, 1, windows=[1, 3, 5, 7])
+    assert np.all(r["threshold"] <= wip + 1e-12)
+    assert np.all(r["threshold"][:, 6] == 0.0)  # the dry pixels themselves stay at 0
+    assert np.all(r["window"][2:7, 1:6] == 1)  # already at raw wip before averaging

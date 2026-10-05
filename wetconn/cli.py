@@ -2,6 +2,7 @@
 
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -10,7 +11,7 @@ from .all_paths import all_paths_connectivity
 from .flowpath import flowpath_connectivity
 from .grid import pixel_size
 from .least_cost import least_cost_connectivity
-from .threshold import NEVER, threshold_connectivity
+from .threshold import NEVER, multiscale_threshold, threshold_connectivity
 
 
 def _common(p, ref_length=True, travel=True):
@@ -126,10 +127,22 @@ def main(argv=None):
     )
     _common(th, ref_length=False, travel=False)
     downstream_args(th)
+    th.add_argument(
+        "--windows",
+        type=int,
+        nargs="+",
+        default=[1],
+        help="Odd focal-mean window sizes in pixels, e.g. 1 3 5 ... 17. Routes are "
+        "judged on each focal mean; the pixel itself keeps its raw wip. Writes one "
+        "file per window (<out>_wNN.tif) and the best over all windows to --out. "
+        "Default: 1 (raw wip only).",
+    )
 
     args = parser.parse_args(argv)
     if args.method != "flowpath" and args.downstream_only and not args.dem:
         parser.error("--downstream-only needs --dem.")
+    if args.method == "threshold" and any(w < 1 or w % 2 == 0 for w in args.windows):
+        parser.error("--windows must be positive odd numbers of pixels.")
     t0 = time.perf_counter()
 
     wip, valid, profile = io.read_raster(args.wip)
@@ -168,6 +181,12 @@ def main(argv=None):
     tags = {"method": args.method, "wip_scale": scale}
     if args.method != "threshold":
         tags.update(ref_length=ref_length, min_wip=args.min_wip, path_threshold=path_threshold)
+    if args.method != "flowpath":
+        tags.update(downstream_only=args.downstream_only)
+        if args.downstream_only:
+            tags.update(max_uphill_slope=args.max_uphill_slope, depressions=args.depressions)
+    area = dx * dy / 1e4
+    levels = (0.75, 0.5, 0.25)
     if args.method == "least-cost":
         dem, dem_valid = io.read_aligned(args.dem, profile) if args.dem else (None, None)
         result = least_cost_connectivity(
@@ -207,19 +226,31 @@ def main(argv=None):
         tags.update(n_sims=args.n_sims, seed=args.seed)
     elif args.method == "threshold":
         dem, dem_valid = io.read_aligned(args.dem, profile) if args.dem else (None, None)
-        result = threshold_connectivity(
-            wip,
-            streams,
-            dx,
-            dy,
-            valid,
-            labels,
-            dem,
-            dem_valid,
+        options = dict(
+            dem=dem,
+            dem_valid=dem_valid,
             downstream_only=args.downstream_only,
             max_uphill_slope=args.max_uphill_slope,
             depressions=args.depressions,
         )
+        if args.windows == [1]:
+            result = threshold_connectivity(wip, streams, dx, dy, valid, labels, **options)
+        else:
+            out = Path(args.out)
+
+            def write_window(size, r):
+                path = out.with_name(f"{out.stem}_w{size:02d}{out.suffix}")
+                io.write_bands(path, profile, r, {**tags, "window": size})
+                t = r["threshold"]
+                connected = ", ".join(
+                    f"{np.sum(t >= level) * area:.1f} ha at {level * scale:g}" for level in levels
+                )
+                print(f"  window {size:2d} ({size * dx:g} m): connected {connected}")
+
+            result = multiscale_threshold(
+                wip, streams, dx, dy, args.windows, valid, labels, write_window, **options
+            )
+            tags.update(windows=",".join(str(w) for w in sorted(set(args.windows))))
     else:
         dem, dem_valid = io.read_aligned(args.dem, profile)
         result = flowpath_connectivity(
@@ -242,19 +273,14 @@ def main(argv=None):
         for code, name in [(1, "reach stream"), (2, "leave domain"), (3, "end in pit")]:
             print(f"  {np.mean(status[valid] == code):6.1%} of pixels {name}")
 
-    if args.method != "flowpath":
-        tags.update(downstream_only=args.downstream_only)
-        if args.downstream_only:
-            tags.update(max_uphill_slope=args.max_uphill_slope, depressions=args.depressions)
     io.write_bands(args.out, profile, result, tags)
 
-    area = dx * dy / 1e4
     if args.method == "threshold":
         t = result["threshold"]
         never = np.sum(valid & (t == NEVER))
         if never:
             print(f"  {never / valid.sum():.1%} of pixels have no allowed route to a stream")
-        for level in (0.75, 0.5, 0.25):
+        for level in levels:
             print(
                 f"at wip >= {level * scale:g}: wetland {np.sum(valid & (wip >= level)) * area:.1f} ha, "
                 f"connected {np.sum(t >= level) * area:.1f} ha"

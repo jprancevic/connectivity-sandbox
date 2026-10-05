@@ -146,3 +146,27 @@ def test_threshold_cli(tmp_path):
     with pytest.raises(SystemExit):  # travel options don't apply here
         main(["threshold", "--wip", str(d / "wip_pct.tif"), "--streams",
               str(d / "streams.gpkg"), "-o", str(out), "--path-threshold", "75"])
+
+
+def test_threshold_windows_cli(tmp_path):
+    d = _inputs(tmp_path)
+    wip = np.full((40, 40), 60, np.uint8)
+    wip[:, 5] = 0  # a one-pixel dry break across the whole grid
+    _write(d / "wip_pct.tif", wip, nodata=255, dtype="uint8")
+    out = d / "ms.tif"
+    main(
+        ["threshold", "--wip", str(d / "wip_pct.tif"), "--streams", str(d / "streams.gpkg"),
+         "-o", str(out), "--centre-only", "--windows", "1", "3"]
+    )
+    bands, tags = _read(out)
+    assert list(bands) == ["threshold", "window", "reach_id"] and tags["windows"] == "1,3"
+    w1, t1 = _read(d / "ms_w01.tif")
+    w3, t3 = _read(d / "ms_w03.tif")
+    assert list(w3) == ["threshold", "route_threshold", "reach_id", "wip_avg"] and t3["window"] == "3"
+    assert np.all(w1["threshold"][5:30, 6:20] == 0)  # cut off at the raw scale
+    np.testing.assert_allclose(w3["threshold"][5:30, 6:20], 0.4, rtol=1e-6)  # 6/9 of 0.6
+    np.testing.assert_allclose(bands["threshold"][5:30, 6:20], 0.4, rtol=1e-6)
+    assert np.all(bands["window"][5:30, 6:20] == 3)
+    with pytest.raises(SystemExit):
+        main(["threshold", "--wip", str(d / "wip_pct.tif"), "--streams",
+              str(d / "streams.gpkg"), "-o", str(out), "--windows", "4"])
