@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wetconn"
+version = "0.1.0"
+description = "Probability that wetlands connect to a drainage network"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "numba",
+    "rasterio",
+    "geopandas",
+    "pyogrio",
+    "shapely>=2",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "scikit-image"]
+
+[tool.setuptools]
+packages = ["wetconn"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::PendingDeprecationWarning:rasterio"]

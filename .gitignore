@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.nbi
+*.nbc
+# Input data and outputs stay out of git.
+data/
+*.tif
+*.tif.aux.xml
+*.gpkg
