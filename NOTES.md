@@ -164,6 +164,15 @@ Threshold method, connected area at each cutoff:
 - 215,648 ha valid; 0.25% of pixels have no allowed route. Connected vs
   mapped wetland: 9,758 of 10,540 ha at 75 (93%), 17,137 of 18,429 ha at 50
   (93%), 28,278 of 30,650 ha at 25 (92%).
+- Same run with `wip_hand.tif` (÷100, no other rescaling):
+  `outputs/skykomish_17110009_threshold_downstream_wiphand.tif`, 23.5 min.
+  Connected vs mapped: 9,793 of 10,610 ha at 75 (92%), 18,729 of 19,641 ha
+  at 50 (95%), 30,385 of 32,006 ha at 25 (95%). Versus `wip_gw`: mean
+  threshold difference +0.2 pts, but 9.1% of pixels differ by > 10 pts, and
+  only 66% of the area connected at 75 in either run is connected in both
+  (gw-only 1,955 ha, hand-only 1,990 ha).
+- Whole-basin comparisons need row-strip processing; full float arrays
+  exhausted the 15 GB of RAM.
 - `wip_smoothed.tif` is not tiled (row strips), so windowed reads are ~10×
   slower; convert to COG before using it.
 
