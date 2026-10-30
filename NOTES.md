@@ -148,6 +148,25 @@ Threshold method, connected area at each cutoff:
     method). Bridging gaps of ≤ 2 pixels would connect all 70 at 75; focal
     means make them worse (49 at window 17).
 
+## Skykomish HUC8 run (17110009)
+
+- `scripts/huc12_threshold.py`: threshold method, downstream-only (1% uphill
+  tolerance, depressions filled), WIP = `wip_gw.tif` (÷100), DEM =
+  `dem_3m.tif`, streams = `reaches_100.parquet` (`reach_id`, rasterized
+  all_touched), per HUC12 with a 50 m buffer; each pixel is taken from the
+  HUC12 containing its centre.
+- HUC12s from the USGS WBD (`prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/WBD/HU2/GPKG/WBD_17_HU2_GPKG.zip`,
+  layer `WBDHU12`); 21 units, 52–151 km². The TNM API and
+  hydro.nationalmap.gov are blocked here; the S3 file server is not.
+- Output: R2 `skykomish/outputs/skykomish_17110009_threshold_downstream_wipgw.tif`
+  (COG, 23482 × 21950, bands threshold / route_threshold / reach_id, 0.94 GB).
+  Took 27 min, peak ~2–4 GB per HUC12.
+- 215,648 ha valid; 0.25% of pixels have no allowed route. Connected vs
+  mapped wetland: 9,758 of 10,540 ha at 75 (93%), 17,137 of 18,429 ha at 50
+  (93%), 28,278 of 30,650 ha at 25 (92%).
+- `wip_smoothed.tif` is not tiled (row strips), so windowed reads are ~10×
+  slower; convert to COG before using it.
+
 ## Open questions / next steps
 
 1. **Focal closing instead of focal mean** for the multi-scale threshold (max
