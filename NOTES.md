@@ -15,6 +15,45 @@ things stand. A new session should read both before changing anything.
 - Test assumptions about the environment (network access, secrets, tools)
   directly instead of giving setup instructions from memory.
 
+## Setting up a new session or environment
+
+The project is moving to Jeff's work Claude account (from a personal one).
+Environment settings don't carry over between accounts, so check each item.
+
+1. **Repository.** `jprancevic/connectivity-sandbox` (personal GitHub).
+   PR #1 (`claude/wetland-drainage-connectivity-ww4nqb`) holds all the code;
+   merge it or check out that branch. The Claude GitHub App needs read and
+   write access to the repo from the new account
+   (https://claude.ai/connect-github), otherwise pushes fail with 403.
+2. **Python.** This image has two Pythons; plain `pip` installed into the
+   wrong one. Use `python3 -m pip install -e ".[test]" boto3 rio-cogeo pyarrow`,
+   then `python3 -m pytest` (62 tests).
+3. **Environment variables** (set in the environment settings; a new session
+   picks them up):
+   - `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`: Cloudflare R2.
+   - `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_SAS_TOKEN`: company Azure Blob.
+     In the old environment `AZURE_STORAGE_ACCOUNT` held the full Blob Service
+     SAS URL; parse the name from it or set it to just the account name.
+   - Plain environment variables, not network secrets: the AWS SigV4 secret
+     type only signs `*.amazonaws.com`, and R2 needs per-request signing.
+4. **Allowed domains:** `79aea752d97fec8cbfe73e3448211c0d.r2.cloudflarestorage.com`
+   and `<account>.blob.core.windows.net`. `prd-tnm.s3.amazonaws.com` (USGS
+   WBD) was reachable by default.
+5. **Smoke tests**, before building anything:
+   - R2: `curl -sS --aws-sigv4 "aws:amz:auto:s3" --user "$R2_ACCESS_KEY_ID:$R2_SECRET_ACCESS_KEY"
+     "https://79aea752d97fec8cbfe73e3448211c0d.r2.cloudflarestorage.com/skykomish?list-type=2"`
+     should list the files. The token is scoped to the bucket, so listing
+     *buckets* fails; list objects in `skykomish` instead.
+   - Azure: the SAS was accepted, but its resource types are Container and
+     Object only (no Service), so listing containers is refused
+     (`AuthorizationResourceTypeMismatch`). That is expected. Ask Jeff for the
+     container name, then list it, read a COG window and write to `outputs/`.
+6. **Files outside the repo.** Inputs and outputs are in R2 `skykomish`.
+   `skykomish_hu12.gpkg` (the 21 WBD HUC12s of HUC8 17110009, EPSG:6350,
+   layer `WBDHU12`) is committed here, so the 824 MB WBD download isn't
+   needed for this basin. `outputs/write_test.txt` in R2 is a leftover test
+   file Jeff may delete.
+
 ## Data
 
 - **Proctor test basin** (Skykomish, WA), EPSG:6350, 3 m grid, 2366 × 1959.
@@ -25,7 +64,7 @@ things stand. A new session should read both before changing anything.
   - WIP is uint8 **percent** (0–100, nodata 255). 37% of valid pixels are 0;
     only 1.9% are ≥ 75. Valid data covers 64% of the rectangle (one
     watershed). Flowline Z matches the DEM (median −0.14 m).
-- **Larger basins** are being uploaded to Cloudflare R2:
+- **Larger basins** are in Cloudflare R2 (see setup above for access):
   - Endpoint `79aea752d97fec8cbfe73e3448211c0d.r2.cloudflarestorage.com`,
     bucket `skykomish` (e.g. `dem_3m.tif`, a ~3 GB COG of HUC8 17110009).
   - Credentials: environment variables `R2_ACCESS_KEY_ID` and
@@ -47,7 +86,7 @@ things stand. A new session should read both before changing anything.
 
 ## Compute plan
 
-- Run in this sandbox, **basin by basin** (e.g. HUC10/HUC12 windows read from
+- Run in the cloud sandbox, **basin by basin** (e.g. HUC10/HUC12 windows read from
   the COGs): 4 cores, ~15 GB RAM, ~28 GB disk.
 - Least-cost peaked at ~6 GB for 44 M pixels (~120–140 bytes/pixel), so one
   run fits ~100 M pixels (~900–1,000 km² at 3 m). Switching internal arrays
