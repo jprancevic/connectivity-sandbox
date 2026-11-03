@@ -15,6 +15,45 @@ things stand. A new session should read both before changing anything.
 - Test assumptions about the environment (network access, secrets, tools)
   directly instead of giving setup instructions from memory.
 
+## Setting up a new session or environment
+
+The project is moving to Jeff's work Claude account (from a personal one).
+Environment settings don't carry over between accounts, so check each item.
+
+1. **Repository.** `jprancevic/connectivity-sandbox` (personal GitHub).
+   PR #1 (`claude/wetland-drainage-connectivity-ww4nqb`) holds all the code;
+   merge it or check out that branch. The Claude GitHub App needs read and
+   write access to the repo from the new account
+   (https://claude.ai/connect-github), otherwise pushes fail with 403.
+2. **Python.** This image has two Pythons; plain `pip` installed into the
+   wrong one. Use `python3 -m pip install -e ".[test]" boto3 rio-cogeo pyarrow`,
+   then `python3 -m pytest` (62 tests).
+3. **Environment variables** (set in the environment settings; a new session
+   picks them up):
+   - `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`: Cloudflare R2.
+   - `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_SAS_TOKEN`: company Azure Blob.
+     In the old environment `AZURE_STORAGE_ACCOUNT` held the full Blob Service
+     SAS URL; parse the name from it or set it to just the account name.
+   - Plain environment variables, not network secrets: the AWS SigV4 secret
+     type only signs `*.amazonaws.com`, and R2 needs per-request signing.
+4. **Allowed domains:** `79aea752d97fec8cbfe73e3448211c0d.r2.cloudflarestorage.com`
+   and `<account>.blob.core.windows.net`. `prd-tnm.s3.amazonaws.com` (USGS
+   WBD) was reachable by default.
+5. **Smoke tests**, before building anything:
+   - R2: `curl -sS --aws-sigv4 "aws:amz:auto:s3" --user "$R2_ACCESS_KEY_ID:$R2_SECRET_ACCESS_KEY"
+     "https://79aea752d97fec8cbfe73e3448211c0d.r2.cloudflarestorage.com/skykomish?list-type=2"`
+     should list the files. The token is scoped to the bucket, so listing
+     *buckets* fails; list objects in `skykomish` instead.
+   - Azure: the SAS was accepted, but its resource types are Container and
+     Object only (no Service), so listing containers is refused
+     (`AuthorizationResourceTypeMismatch`). That is expected. Ask Jeff for the
+     container name, then list it, read a COG window and write to `outputs/`.
+6. **Files outside the repo.** Inputs and outputs are in R2 `skykomish`.
+   `skykomish_hu12.gpkg` (the 21 WBD HUC12s of HUC8 17110009, EPSG:6350,
+   layer `WBDHU12`) is committed here, so the 824 MB WBD download isn't
+   needed for this basin. `outputs/write_test.txt` in R2 is a leftover test
+   file Jeff may delete.
+
 ## Data
 
 - **Proctor test basin** (Skykomish, WA), EPSG:6350, 3 m grid, 2366 × 1959.
@@ -25,7 +64,7 @@ things stand. A new session should read both before changing anything.
   - WIP is uint8 **percent** (0–100, nodata 255). 37% of valid pixels are 0;
     only 1.9% are ≥ 75. Valid data covers 64% of the rectangle (one
     watershed). Flowline Z matches the DEM (median −0.14 m).
-- **Larger basins** are being uploaded to Cloudflare R2:
+- **Larger basins** are in Cloudflare R2 (see setup above for access):
   - Endpoint `79aea752d97fec8cbfe73e3448211c0d.r2.cloudflarestorage.com`,
     bucket `skykomish` (e.g. `dem_3m.tif`, a ~3 GB COG of HUC8 17110009).
   - Credentials: environment variables `R2_ACCESS_KEY_ID` and
@@ -47,7 +86,7 @@ things stand. A new session should read both before changing anything.
 
 ## Compute plan
 
-- Run in this sandbox, **basin by basin** (e.g. HUC10/HUC12 windows read from
+- Run in the cloud sandbox, **basin by basin** (e.g. HUC10/HUC12 windows read from
   the COGs): 4 cores, ~15 GB RAM, ~28 GB disk.
 - Least-cost peaked at ~6 GB for 44 M pixels (~120–140 bytes/pixel), so one
   run fits ~100 M pixels (~900–1,000 km² at 3 m). Switching internal arrays
@@ -147,6 +186,34 @@ Threshold method, connected area at each cutoff:
   - The 70 mapped (≥ 75) pixels above the head connect at 65 (threshold
     method). Bridging gaps of ≤ 2 pixels would connect all 70 at 75; focal
     means make them worse (49 at window 17).
+
+## Skykomish HUC8 run (17110009)
+
+- `scripts/huc12_threshold.py`: threshold method, downstream-only (1% uphill
+  tolerance, depressions filled), WIP = `wip_gw.tif` (÷100), DEM =
+  `dem_3m.tif`, streams = `reaches_100.parquet` (`reach_id`, rasterized
+  all_touched), per HUC12 with a 50 m buffer; each pixel is taken from the
+  HUC12 containing its centre.
+- HUC12s from the USGS WBD (`prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/WBD/HU2/GPKG/WBD_17_HU2_GPKG.zip`,
+  layer `WBDHU12`); 21 units, 52–151 km². The TNM API and
+  hydro.nationalmap.gov are blocked here; the S3 file server is not.
+- Output: R2 `skykomish/outputs/skykomish_17110009_threshold_downstream_wipgw.tif`
+  (COG, 23482 × 21950, bands threshold / route_threshold / reach_id, 0.94 GB).
+  Took 27 min, peak ~2–4 GB per HUC12.
+- 215,648 ha valid; 0.25% of pixels have no allowed route. Connected vs
+  mapped wetland: 9,758 of 10,540 ha at 75 (93%), 17,137 of 18,429 ha at 50
+  (93%), 28,278 of 30,650 ha at 25 (92%).
+- Same run with `wip_hand.tif` (÷100, no other rescaling):
+  `outputs/skykomish_17110009_threshold_downstream_wiphand.tif`, 23.5 min.
+  Connected vs mapped: 9,793 of 10,610 ha at 75 (92%), 18,729 of 19,641 ha
+  at 50 (95%), 30,385 of 32,006 ha at 25 (95%). Versus `wip_gw`: mean
+  threshold difference +0.2 pts, but 9.1% of pixels differ by > 10 pts, and
+  only 66% of the area connected at 75 in either run is connected in both
+  (gw-only 1,955 ha, hand-only 1,990 ha).
+- Whole-basin comparisons need row-strip processing; full float arrays
+  exhausted the 15 GB of RAM.
+- `wip_smoothed.tif` is not tiled (row strips), so windowed reads are ~10×
+  slower; convert to COG before using it.
 
 ## Open questions / next steps
 
