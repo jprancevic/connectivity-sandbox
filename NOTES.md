@@ -215,6 +215,37 @@ Threshold method, connected area at each cutoff:
 - `wip_smoothed.tif` is not tiled (row strips), so windowed reads are ~10×
   slower; convert to COG before using it.
 
+## Wetland polygon connectivity (Skykomish, wip_gw)
+
+- Polygons: R2 `wetland_poly.gpkg` (layer `tw_wetland_polygons_max`, 4,673
+  multipolygons, 17,256 ha, smallest ~1 acre, EPSG:6350).
+- `scripts/polygon_threshold.py` scores each polygon from the existing
+  threshold raster (no new flood). A polygon is treated as wet and freely
+  crossable; everything outside it, **other polygons included, counts at its
+  pixel WIP** (Jeff's choice: touching a connected polygon does not connect a
+  polygon). Multipart polygons are one unit.
+  - Intersects a flowline (vector test) → 1, reach with the longest length
+    inside the polygon.
+  - Otherwise → max `route_threshold` over pixels whose centre is inside
+    (fallback: touched pixels; not needed here). This equals a fresh search
+    from the polygon with the polygon free, and the max always falls on a
+    margin pixel. Using pixels merely *touching* the polygon would overstate
+    it, since `route_threshold` leaves the pixel's own WIP out.
+- Output: R2 `outputs/skykomish_17110009_wetland_poly_threshold_wipgw.gpkg`
+  (layer `polygon_threshold`; columns `route_threshold`, `reach_id`,
+  `source`, `best_x`, `best_y`). 27 s. Checked against `rasterio.mask`.
+- 4,177 polygons (89%, 96% of area) intersect a flowline. Of the other 496:
+  26 connect at 1 (next to a stream pixel), 188 at 0.9–1, 118 at 0.75–0.9,
+  81 at 0.5–0.75, 51 at 0.25–0.5, 28 below 0.25, 4 have no allowed route
+  (all small riverine/lacustrine). Overall connected: 4,514 at 0.75
+  (17,111 ha), 4,592 at 0.5, 4,642 at 0.25.
+- For reference, letting touching polygons pass connection on (iterated to
+  convergence) would have left only 107 polygons (95 ha) unconnected by
+  contact; not used.
+- `grid_window` in `huc12_threshold.py` rounds offset and length separately
+  and can drop the last row/column; the polygon script pads by a pixel. In
+  the HUC12 run this only trims the 50 m buffer edge, so results are unaffected.
+
 ## Open questions / next steps
 
 1. **Focal closing instead of focal mean** for the multi-scale threshold (max
