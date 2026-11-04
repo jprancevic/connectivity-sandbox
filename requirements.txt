@@ -6,7 +6,5 @@ rasterio
 shapely
 numba
 # tests only
+pytest
 scipy
-nbformat
-nbclient
-ipykernel

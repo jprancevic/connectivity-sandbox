@@ -6,14 +6,28 @@ Tools that label every DEM cell with the first wetland its D8 flow path reaches,
 
 | file | what it is |
 |---|---|
-| `wetland_drainage_areas.ipynb` | Reference implementation. Settings cell, one cell of numba kernels (`pass1`, `find`, `pass2`), then the pass 1 cell, the pass 2 cell, and an optional polygons cell. |
-| `tests/make_test_data.py` | Builds a synthetic test landscape: DEM, rounded copy of the DEM, wetlands, streams, planted flat cases. |
-| `tests/check_pass1.py` | Independent re-implementation of pass 1 (vectorised D8, Python flat routing, sorted-elevation walk). Compares cell by cell. |
-| `tests/check_pass2.py` | Independent, literal pit-by-pit pass 2. Compares cell by cell and pit by pit. |
-| `tests/check_cases.py` | Spot checks on the planted flat cases and the value scheme. |
-| `tests/run_notebook.py` | Runs the notebook headless with Settings overridden (used by the tests until the notebook becomes a package). |
-| `tests/run_all.sh` | Runs everything. Takes about a minute. |
-| `requirements.txt` | Dependencies. |
+| `wetland_drainage/routing.py` | The numba kernels (`pass1`, `find`, `pass2`) and their module-level constants, copied unchanged from the notebook. |
+| `wetland_drainage/run.py` | `run()`: reads the inputs, runs both passes, writes the outputs. Its body is the notebook's pass 1, pass 2 and polygon cells. |
+| `wetland_drainage/cli.py` | Command line wrapper around `run()`. |
+| `wetland_drainage_areas.ipynb` | The original notebook, the reference the package was built from. No longer tested. |
+| `tests/test_wetland_drainage.py` | pytest: calls `run()` on three cases and applies every check below. |
+| `tests/make_test_data.py` | `make_test_data()`: builds a synthetic test landscape (DEM, rounded copy of the DEM, wetlands, streams, planted flat cases). |
+| `tests/check_pass1.py` | `check_pass1()`: independent re-implementation of pass 1 (vectorised D8, Python flat routing, sorted-elevation walk). Compares cell by cell. |
+| `tests/check_pass2.py` | `check_pass2()`: independent, literal pit-by-pit pass 2. Compares cell by cell and pit by pit. |
+| `tests/check_cases.py` | `check_cases()`: spot checks on the planted flat cases and the value scheme. |
+| `requirements.txt` | Dependencies (also in `pyproject.toml`). |
+
+Usage:
+
+```bash
+python3 -m wetland_drainage.cli DEM.tif wetlands.gpkg out_dir skykomish --streams reaches.shp [--polygons]
+```
+
+```python
+from wetland_drainage import run
+paths = run(dem_path, wetlands_path, out_dir, prefix, id_field="Wetlands ID", streams_path=None,
+            all_touched=False, write_polygons=False, wetlands_layer=None)   # dict of output paths
+```
 
 Inputs used in the real project (Skykomish, HUC8 17110009):
 - DEM: `17110009_Skykomish_DEM_3m_huc8.tif`, 3 m, about 3 GB.
@@ -98,13 +112,14 @@ Inputs used in the real project (Skykomish, HUC8 17110009):
 
 ## Verification
 
-`bash tests/run_all.sh` builds the test data, runs the notebook on three cases (no streams, streams, rounded DEM with streams), and runs every check. It must print `ALL CHECKS PASSED`.
+`python3 -m pytest tests/test_wetland_drainage.py` builds the test data, calls `run()` on three cases (no streams, streams, rounded DEM with streams), and runs every check (about 45 s). `python3 -m pytest` runs these with the `wetconn` tests.
 
 What the checks establish:
 - **Pass 1:** identical, cell for cell on 1.8 M cells, to an independent implementation using the sorted-elevation walk. Pit catchments match as a partition.
 - **Pass 2:** identical to a literal pit-by-pit procedure, which takes pits by floor elevation, finds each pit's lowest outlet, and merges when it spills into an undrained pit. Every pit's destination matches.
 - **Planted cases:** a flat lake with an outlet produces no pit, a closed flat bowl becomes exactly one pit, and a flat bowl around a wetland drains into the wetland. Wetland ID 0 is stored as 1, and the cell counts add up.
-- **The checks can fail.** A deliberately broken D8 tie-break is caught (on the rounded DEM), and so is a broken spill-height rule.
+- **The checks can fail.** A deliberately broken D8 tie-break is caught (on the rounded DEM), and so is a broken spill-height rule (pass 2 fails on all three cases). Re-checked after the refactor.
+- **Package = notebook.** On all three cases the package wrote rasters identical cell for cell, CSVs identical byte for byte, and the same polygons as the notebook.
 
 Performance on 64 M cells, 2 cores: pass 1 took 24 s and pass 2 took 12 s, with about 1.1 GB peak memory. Memory is about 10 bytes per cell plus about 1 GB, so the 3 GB DEM (about 750 M cells) should need roughly 8–9 GB.
 
@@ -115,24 +130,8 @@ Performance on 64 M cells, 2 cores: pass 1 took 24 s and pass 2 took 12 s, with 
 3. **Polygonizing is slow** on very large rasters, which is why it's off by default.
 4. Possibly give stream cells a value different from "left the DEM".
 
-## Turning this into a package
+## Package
 
-Suggested layout:
-
-```
-wetland_drainage/
-  routing.py     # pass1, find, pass2 kernels, copied unchanged from the notebook
-  run.py         # run(dem_path, wetlands_path, out_dir, prefix, id_field=..., streams_path=None,
-                 #     all_touched=False, write_polygons=False) -> dict of outputs; body = notebook cells
-  cli.py         # thin argparse wrapper around run()
-tests/           # these scripts; replace run_notebook.py with direct calls to run(), wrap checks in pytest
-```
-
-Ground rules for the refactor:
-- Keep the three kernels' logic identical. The tests compare cell for cell, so any behaviour change shows up.
+The notebook was turned into the `wetland_drainage` package (layout above) following these rules, which still apply:
+- Keep the three kernels' logic identical unless a change is intended. The tests compare cell for cell, so any behaviour change shows up.
 - Keep the numba constants (`DR`, `DC`, `FLAT`, `OUT`, `WET`, `NODATA`, `UNSET`, `EXTERNAL`) at module level in `routing.py`. Numba freezes globals at compile time.
-- Make the tests pass before and after the refactor.
-
-Prompt to start the session with:
-
-> Read HANDOFF.md. Run `bash tests/run_all.sh` to confirm everything passes. Then turn `wetland_drainage_areas.ipynb` into the package layout in HANDOFF.md, converting the tests to pytest that call `run()` directly, and keep all checks passing.
