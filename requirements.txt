@@ -1,0 +1,12 @@
+numpy
+pandas
+geopandas
+pyogrio
+rasterio
+shapely
+numba
+# tests only
+scipy
+nbformat
+nbclient
+ipykernel
